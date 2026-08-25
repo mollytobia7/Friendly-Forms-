@@ -693,7 +693,7 @@ function hasFileField(fields) {
 }
 
 async function generateMealWaiverPdf(values) {
-  const response = await fetch("/templates/meal-break-waiver.pdf");
+ const response = await fetch("/templates/meal-break-waiver.pdf", { cache: "no-store" });
   if (!response.ok) throw new Error("Meal Break Waiver template could not be loaded.");
 
   const pdf = await PDFDocument.load(await response.arrayBuffer());
