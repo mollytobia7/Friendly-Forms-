@@ -108,6 +108,15 @@ const ICONS = {
 };
 const ICON_OPTIONS = Object.keys(ICONS);
 
+const PDF_FORM_TAB_IDS = new Set([
+  "meal",
+  "mealwaiver",
+  "cotreatment",
+  "timeoff",
+  "sicktime",
+  "reinforcer",
+]);
+
 const FIELD_TYPE_LABELS = {
   text: "Short text",
   email: "Email",
@@ -1021,12 +1030,18 @@ function FormRenderer({ schema, onSubmitted }) {
   const setField = (id) => (v) => setValues((cur) => ({ ...cur, [id]: v }));
 
   const canSubmit = allRequiredFilled(schema.fields, values);
+  const requiresPdf = PDF_FORM_TAB_IDS.has(schema.id) || !!template;
 
   const handleSubmit = async () => {
     setSubmitting(true);
     setPdfError("");
 
-    if (schema.id === "mealwaiver" || template) {
+    if (requiresPdf) {
+      if (schema.id !== "mealwaiver" && !template) {
+        setPdfError(`Please upload the ${schema.label} PDF template before generating this form.`);
+        setSubmitting(false);
+        return;
+      }
       try {
         const bytes = template
           ? await generateUploadedTemplatePdf(template, schema, values)
@@ -1043,7 +1058,7 @@ function FormRenderer({ schema, onSubmitted }) {
         setSentMsg(`Your ${schema.label} PDF has been downloaded.`);
         onSubmitted && onSubmitted();
       } catch (error) {
-        console.error("Could not generate Meal Break Waiver PDF", error);
+        console.error(`Could not generate ${schema.label} PDF`, error);
         setPdfError(error instanceof Error ? error.message : "Could not generate the PDF. Please try again.");
       } finally {
         setSubmitting(false);
@@ -1096,7 +1111,7 @@ function FormRenderer({ schema, onSubmitted }) {
         style={{ background: COLORS.heartDeep }}
       >
         <Send size={16} />
-        {schema.id === "mealwaiver" || template ? "Generate PDF" : "Sign & Send to Admin"}
+        {requiresPdf ? "Generate PDF" : "Sign & Send to Admin"}
       </button>
 
       {(sentMsg || pdfError) && (
