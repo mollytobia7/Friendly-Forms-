@@ -855,54 +855,50 @@ async function generateUploadedTemplatePdf(template, schema, values) {
     .filter(({ value, placement }) => !placement && value !== undefined && value !== null && value !== "");
   if (positionedFields.length > 0) {
     positionedFields.forEach(({ value, placement }) => {
-      const page = pdf.getPages()[Number(placement.page || 1) - 1];
-      if (!page) return;
-      const size = Number(placement.fontSize) || 11;
-      const maxWidth = Number(placement.width) || 180;
-      const text = String(value);
-      const fitted = font.widthOfTextAtSize(text, size) > maxWidth
-        ? text.slice(0, Math.floor(text.length * (maxWidth / font.widthOfTextAtSize(text, size))))
-        : text;
-      page.drawText(fitted, {
-        x: Number(placement.x) || 0,
-        y: Number(placement.y) || 0,
-        size,
-        font,
-        color,
-      });
+      drawPdfField(pdf, font, color, value, placement);
     });
     if (unplacedFields.length === 0) return pdf.save();
   }
 
-  const pages = pdf.getPages();
-  const page = pages[pages.length - 1];
-  const lines = (positionedFields.length > 0
-    ? unplacedFields.map(({ field, value }) => `${field.label || field.id}: ${value}`)
-    : buildEmailBody(schema.fields, values).split("\n")
-  ).filter(Boolean);
-  const lineHeight = 14;
-  const maxLines = Math.floor((page.getHeight() - 72) / lineHeight);
-  const visibleLines = lines.slice(0, maxLines - 1);
-  const startY = page.getHeight() - 40;
+  drawUnplacedPdfFields(pdf, font, color, unplacedFields);
 
-  page.drawText("Submitted form details", {
-    x: 36,
-    y: startY,
-    size: 12,
+  return pdf.save();
+}
+
+function drawPdfField(pdf, font, color, value, placement) {
+  const page = pdf.getPages()[Number(placement.page || 1) - 1];
+  if (!page) return;
+  const size = Number(placement.fontSize) || 11;
+  const maxWidth = Number(placement.width) || 180;
+  const text = String(value);
+  const textWidth = font.widthOfTextAtSize(text, size);
+  const fitted = textWidth > maxWidth
+    ? text.slice(0, Math.max(1, Math.floor(text.length * (maxWidth / textWidth))))
+    : text;
+  page.drawText(fitted, {
+    x: Number(placement.x) || 0,
+    y: Number(placement.y) || 0,
+    size,
     font,
     color,
   });
-  visibleLines.forEach((line, index) => {
-    page.drawText(line.slice(0, 110), {
-      x: 36,
-      y: startY - ((index + 1) * lineHeight),
-      size: 9,
-      font,
-      color: rgb(0.1, 0.15, 0.2),
-    });
-  });
+}
 
-  return pdf.save();
+function drawUnplacedPdfFields(pdf, font, color, fields) {
+  let pageIndex = pdf.getPages().length - 1;
+  let y = pdf.getPages()[pageIndex].getHeight() - 42;
+  fields.forEach(({ field, value }) => {
+    if (y < 42) {
+      pdf.addPage([612, 792]);
+      pageIndex = pdf.getPages().length - 1;
+      y = pdf.getPages()[pageIndex].getHeight() - 42;
+    }
+    const page = pdf.getPages()[pageIndex];
+    const label = `${field.label || field.id}:`;
+    page.drawText(label, { x: 36, y, size: 8, font, color: rgb(0.25, 0.3, 0.35) });
+    page.drawText(String(value).slice(0, 110), { x: 190, y, size: 9, font, color });
+    y -= 18;
+  });
 }
 
 function formatPdfValue(field, value) {
