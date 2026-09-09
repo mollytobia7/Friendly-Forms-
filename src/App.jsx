@@ -29,6 +29,56 @@ import {
 import { supabase, supabaseConfigError } from "./lib/supabase";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
+const browserTemplateStorage = {
+  dbPromise: null,
+  open() {
+    if (!this.dbPromise) {
+      this.dbPromise = new Promise((resolve, reject) => {
+        const request = window.indexedDB.open("friendly-forms", 1);
+        request.onupgradeneeded = () => request.result.createObjectStore("templates");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    }
+    return this.dbPromise;
+  },
+  async get(key) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction("templates", "readonly").objectStore("templates").get(key);
+      request.onsuccess = () => resolve({ value: request.result || null });
+      request.onerror = () => reject(request.error);
+    });
+  },
+  async set(key, value) {
+    const db = await this.open();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction("templates", "readwrite").objectStore("templates").put(value, key);
+      request.onsuccess = () => resolve({ key, value });
+      request.onerror = () => reject(request.error);
+    });
+  },
+};
+
+const appStorage = {
+  async get(key, shared = false) {
+    if (key.startsWith("form-template:")) return browserTemplateStorage.get(key);
+    if (window.storage) return window.storage.get(key, shared);
+    return { value: window.localStorage.getItem(key) };
+  },
+  async set(key, value, shared = false) {
+    if (key.startsWith("form-template:")) return browserTemplateStorage.set(key, value);
+    if (window.storage) return window.storage.set(key, value, shared);
+    window.localStorage.setItem(key, value);
+    return { key, value };
+  },
+  async list(prefix) {
+    if (window.storage) return window.storage.list(prefix, false);
+    const keys = Object.keys(window.localStorage).filter((key) => key.startsWith(prefix));
+    return { keys };
+  },
+};
+
 // ---------- design tokens ----------
 const COLORS = {
   ink: "#1E2B33",
@@ -300,7 +350,41 @@ const DEFAULT_SCHEMAS = [
       { id: "signature", type: "signature", label: "Signature — type your full legal name", required: true },
     ],
   },
+  {
+    id: "reinforcer",
+    label: "Reinforcer Form",
+    icon: "ClipboardList",
+    ready: false,
+    fields: [
+      { id: "name", type: "text", label: "Employee Name", required: true },
+      { id: "date", type: "date", label: "Date", required: true },
+      { id: "client", type: "text", label: "Client" },
+      { id: "details", type: "textarea", label: "Reinforcer details", required: true },
+      { id: "signature", type: "signature", label: "Signature — type your full legal name", required: true },
+    ],
+  },
+  {
+    id: "vto",
+    label: "VTO Request",
+    icon: "Briefcase",
+    ready: false,
+    fields: [
+      { id: "name", type: "text", label: "Employee Name", required: true },
+      { id: "date", type: "date", label: "Date", required: true },
+      { id: "beginningOn", type: "date", label: "Beginning On", required: true },
+      { id: "endingOn", type: "date", label: "Ending On", required: true },
+      { id: "reason", type: "textarea", label: "Reason for Request", required: true },
+      { id: "signature", type: "signature", label: "Signature — type your full legal name", required: true },
+    ],
+  },
 ];
+
+function mergeSchemas(saved) {
+  const savedById = new Map(saved.map((schema) => [schema.id, schema]));
+  const defaults = DEFAULT_SCHEMAS.map((schema) => savedById.get(schema.id) || schema);
+  const defaultIds = new Set(DEFAULT_SCHEMAS.map((schema) => schema.id));
+  return [...defaults, ...saved.filter((schema) => !defaultIds.has(schema.id))];
+}
 
 // ---------- small UI atoms ----------
 function HeartbeatDivider() {
@@ -721,6 +805,110 @@ async function generateMealWaiverPdf(values) {
   return pdf.save();
 }
 
+async function generateUploadedTemplatePdf(template, schema, values) {
+  const pdf = await PDFDocument.load(template.dataUrl);
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const color = rgb(0.05, 0.2, 0.45);
+  const form = pdf.getForm();
+  const pdfFields = form.getFields();
+  const fieldValues = flattenPdfValues(schema.fields, values);
+  let filledFields = 0;
+
+  pdfFields.forEach((pdfField) => {
+    const name = pdfField.getName();
+    const appField = fieldValues.find(({ field }) =>
+      [field.pdfFieldName, field.id, field.label].filter(Boolean).some((candidate) => normalizePdfFieldName(candidate) === normalizePdfFieldName(name))
+    );
+    if (!appField || appField.value === undefined || appField.value === null || appField.value === "") return;
+
+    try {
+      const fieldType = pdfField.constructor.name;
+      if (fieldType === "PDFCheckBox") {
+        if (appField.value) pdfField.check();
+      } else if (fieldType === "PDFDropdown" || fieldType === "PDFOptionList" || fieldType === "PDFRadioGroup") {
+        pdfField.select(String(Array.isArray(appField.value) ? appField.value[0] : appField.value));
+      } else if (typeof pdfField.setText === "function") {
+        pdfField.setText(String(appField.value));
+      }
+      filledFields += 1;
+    } catch (error) {
+      console.warn(`Could not fill PDF field "${name}"`, error);
+    }
+  });
+
+  if (filledFields > 0) {
+    form.updateFieldAppearances(font);
+    return pdf.save();
+  }
+
+  const pages = pdf.getPages();
+  const page = pages[pages.length - 1];
+  const lines = buildEmailBody(schema.fields, values).split("\n").filter(Boolean);
+  const lineHeight = 14;
+  const maxLines = Math.floor((page.getHeight() - 72) / lineHeight);
+  const visibleLines = lines.slice(0, maxLines - 1);
+  const startY = page.getHeight() - 40;
+
+  page.drawText("Submitted form details", {
+    x: 36,
+    y: startY,
+    size: 12,
+    font,
+    color,
+  });
+  visibleLines.forEach((line, index) => {
+    page.drawText(line.slice(0, 110), {
+      x: 36,
+      y: startY - ((index + 1) * lineHeight),
+      size: 9,
+      font,
+      color: rgb(0.1, 0.15, 0.2),
+    });
+  });
+
+  return pdf.save();
+}
+
+function normalizePdfFieldName(value) {
+  return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function flattenPdfValues(fields, values, result = []) {
+  fields.forEach((field) => {
+    if (field.type === "notice") return;
+    if (field.type === "repeater") {
+      (values[field.id] || []).forEach((row, index) => {
+        flattenPdfValues(
+          field.fields.map((child) => ({
+            ...child,
+            id: `${field.id}_${index + 1}_${child.id}`,
+            label: `${field.label || field.id} ${index + 1} ${child.label || child.id}`,
+          })),
+          row,
+          result
+        );
+      });
+      return;
+    }
+    const value = field.type === "checkbox"
+      ? values[field.id]
+      : field.type === "chips-multi"
+        ? (values[field.id] || []).join(", ")
+        : values[field.id];
+    result.push({ field, value });
+  });
+  return result;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 function FormRenderer({ schema, onSubmitted }) {
   const initial = {};
   schema.fields.forEach((f) => {
@@ -733,7 +921,22 @@ function FormRenderer({ schema, onSubmitted }) {
   const [submitting, setSubmitting] = useState(false);
   const [sentMsg, setSentMsg] = useState("");
   const [pdfError, setPdfError] = useState("");
+  const [template, setTemplate] = useState(null);
   const needsAttachment = hasFileField(schema.fields);
+
+  useEffect(() => {
+    let cancelled = false;
+    appStorage.get(`form-template:${schema.id}`, true).then((res) => {
+      if (!cancelled && res && res.value) {
+        try {
+          setTemplate(JSON.parse(res.value));
+        } catch (error) {
+          console.error("Could not load form template", error);
+        }
+      }
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [schema.id]);
 
   const setField = (id) => (v) => setValues((cur) => ({ ...cur, [id]: v }));
 
@@ -743,19 +946,21 @@ function FormRenderer({ schema, onSubmitted }) {
     setSubmitting(true);
     setPdfError("");
 
-    if (schema.id === "mealwaiver") {
+    if (schema.id === "mealwaiver" || template) {
       try {
-        const bytes = await generateMealWaiverPdf(values);
+        const bytes = template
+          ? await generateUploadedTemplatePdf(template, schema, values)
+          : await generateMealWaiverPdf(values);
         const blob = new Blob([bytes], { type: "application/pdf" });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = `meal-break-waiver-${(values.name || "employee").trim().replace(/[^a-z0-9]+/gi, "-").toLowerCase()}.pdf`;
+        link.download = `${slugify(schema.label)}-${slugify(values.name || values.staffName || "submission")}.pdf`;
         document.body.appendChild(link);
         link.click();
         link.remove();
         URL.revokeObjectURL(url);
-        setSentMsg("Your Meal Break Waiver PDF has been downloaded.");
+        setSentMsg(`Your ${schema.label} PDF has been downloaded.`);
         onSubmitted && onSubmitted();
       } catch (error) {
         console.error("Could not generate Meal Break Waiver PDF", error);
@@ -774,7 +979,7 @@ function FormRenderer({ schema, onSubmitted }) {
     )}&body=${encodeURIComponent(body)}`;
 
     try {
-      await window.storage.set(
+      await appStorage.set(
         `submission:${schema.id}:${Date.now()}`,
         JSON.stringify({ ...values, submittedAt: new Date().toISOString() }),
         false
@@ -811,7 +1016,7 @@ function FormRenderer({ schema, onSubmitted }) {
         style={{ background: COLORS.heartDeep }}
       >
         <Send size={16} />
-        {schema.id === "mealwaiver" ? "Generate PDF" : "Sign & Send to Admin"}
+        {schema.id === "mealwaiver" || template ? "Generate PDF" : "Sign & Send to Admin"}
       </button>
 
       {(sentMsg || pdfError) && (
@@ -900,6 +1105,11 @@ function AdminFieldEditor({ field, onChange, onRemove, onMove, first, last, dept
           {field.type === "checkbox" && (
             <Field label="Agreement text shown next to the checkbox">
               <TextArea value={field.label} onChange={(e) => set({ label: e.target.value })} rows={2} />
+            </Field>
+          )}
+          {field.type !== "notice" && field.type !== "repeater" && (
+            <Field label="PDF field name (optional)" hint="Use the internal field name from the uploaded fillable PDF when it differs from this field's id or label.">
+              <TextInput value={field.pdfFieldName || ""} onChange={(e) => set({ pdfFieldName: e.target.value })} placeholder="e.g. employee_name" />
             </Field>
           )}
           {["text", "email", "tel", "number", "textarea", "signature", "file"].includes(field.type) && (
@@ -1091,6 +1301,92 @@ function AdminFormCard({ schema, onChange, onRemove, onMove, first, last }) {
   );
 }
 
+function TemplateManager({ schemas }) {
+  const [templates, setTemplates] = useState({});
+  const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all(schemas.map(async (schema) => {
+      try {
+        const res = await appStorage.get(`form-template:${schema.id}`, true);
+        return [schema.id, res && res.value ? JSON.parse(res.value) : null];
+      } catch {
+        return [schema.id, null];
+      }
+    })).then((entries) => {
+      if (!cancelled) setTemplates(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+  }, [schemas]);
+
+  const upload = async (schema, event) => {
+    const file = event.target.files && event.target.files[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.type !== "application/pdf") {
+      setStatus("Please choose a PDF file.");
+      return;
+    }
+    try {
+      const next = { name: file.name, dataUrl: await readFileAsDataUrl(file) };
+      const saved = await appStorage.set(`form-template:${schema.id}`, JSON.stringify(next), true);
+      if (!saved) throw new Error("Storage rejected the template");
+      setTemplates((current) => ({ ...current, [schema.id]: next }));
+      setStatus(`${schema.label} template uploaded.`);
+    } catch (error) {
+      console.error("Could not save form template", error);
+      setStatus("Could not save that template. Try a smaller PDF.");
+    }
+  };
+
+  const remove = async (schema) => {
+    try {
+      await appStorage.set(`form-template:${schema.id}`, "", true);
+      setTemplates((current) => ({ ...current, [schema.id]: null }));
+      setStatus(`${schema.label} template removed.`);
+    } catch {
+      setStatus("Could not remove that template.");
+    }
+  };
+
+  return (
+    <div className="rounded-xl p-4 space-y-3" style={{ border: `1px solid ${COLORS.line}`, background: COLORS.paper }}>
+      <div>
+        <h3 className="text-[16px] font-semibold" style={{ fontFamily: "'Fraunces', serif", color: COLORS.ink }}>
+          PDF templates
+        </h3>
+        <p className="text-[12.5px]" style={{ color: "#8A8378" }}>
+          Upload the PDF used by each tab. Uploads save automatically; the Save changes button below is for form fields and tab settings.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {schemas.map((schema) => (
+          <div key={schema.id} className="flex flex-col sm:flex-row sm:items-center gap-2 rounded-md p-3" style={{ background: "white", border: `1px solid ${COLORS.line}` }}>
+            <div className="flex-1 min-w-0">
+              <div className="text-[13.5px] font-medium" style={{ color: COLORS.ink }}>{schema.label}</div>
+              <div className="text-[12px] truncate" style={{ color: templates[schema.id] ? COLORS.good : "#8A8378" }}>
+                {templates[schema.id] ? templates[schema.id].name : "No PDF uploaded"}
+              </div>
+            </div>
+            <label className="inline-flex items-center justify-center gap-1.5 text-[12.5px] font-medium px-3 py-1.5 rounded-md border cursor-pointer" style={{ borderColor: COLORS.heartDeep, color: COLORS.heartDeep }}>
+              <Upload size={14} />
+              {templates[schema.id] ? "Replace" : "Upload PDF"}
+              <input type="file" accept="application/pdf" onChange={(event) => upload(schema, event)} className="hidden" />
+            </label>
+            {templates[schema.id] && (
+              <button type="button" onClick={() => remove(schema)} className="text-[12.5px] font-medium" style={{ color: COLORS.bad }}>
+                Remove
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {status && <div className="text-[12.5px]" style={{ color: COLORS.good }}>{status}</div>}
+    </div>
+  );
+}
+
 function AdminPanel({ schemas, setSchemas, persist, onLock }) {
   const [draft, setDraft] = useState(schemas);
   const [status, setStatus] = useState("");
@@ -1127,7 +1423,7 @@ function AdminPanel({ schemas, setSchemas, persist, onLock }) {
 
   const handleSave = async () => {
     const ok = await persist(draft);
-    setSchemas(draft);
+    if (ok) setSchemas(draft);
     setStatus(ok ? "Saved — staff will see these changes." : "Couldn't save right now, please try again.");
     setTimeout(() => setStatus(""), 4000);
   };
@@ -1160,6 +1456,8 @@ function AdminPanel({ schemas, setSchemas, persist, onLock }) {
         ))}
       </div>
 
+      <TemplateManager schemas={draft} />
+
       <div className="rounded-xl p-4 flex flex-col sm:flex-row gap-2 sm:items-end" style={{ border: `1px dashed ${COLORS.line}` }}>
         <Field label="New form name" span>
           <TextInput value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="e.g. Incident Report" />
@@ -1178,9 +1476,8 @@ function AdminPanel({ schemas, setSchemas, persist, onLock }) {
       <div className="flex items-center gap-3 sticky bottom-3">
         <button
           type="button"
-          disabled={!dirty}
           onClick={handleSave}
-          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md font-medium text-white transition disabled:opacity-40"
+          className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md font-medium text-white transition"
           style={{ background: COLORS.heartDeep }}
         >
           <Save size={15} />
@@ -1217,16 +1514,16 @@ function BlueHeartsFormsApp({ onSignOut, userRole }) {
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get("form-schemas", true);
+        const res = await appStorage.get("form-schemas", true);
         if (res && res.value) {
           const parsed = JSON.parse(res.value);
-          if (Array.isArray(parsed) && parsed.length) setSchemas(parsed);
+          if (Array.isArray(parsed) && parsed.length) setSchemas(mergeSchemas(parsed));
         } else {
-          await window.storage.set("form-schemas", JSON.stringify(DEFAULT_SCHEMAS), true);
+          await appStorage.set("form-schemas", JSON.stringify(DEFAULT_SCHEMAS), true);
         }
       } catch (err) {
         try {
-          await window.storage.set("form-schemas", JSON.stringify(DEFAULT_SCHEMAS), true);
+          await appStorage.set("form-schemas", JSON.stringify(DEFAULT_SCHEMAS), true);
         } catch (err2) {
           console.error("Could not seed form schemas", err2);
         }
@@ -1237,7 +1534,7 @@ function BlueHeartsFormsApp({ onSignOut, userRole }) {
 
   const refreshHistory = async () => {
     try {
-      const res = await window.storage.list("submission:", false);
+      const res = await appStorage.list("submission:");
       if (res && res.keys) setHistory(res.keys);
     } catch (err) {
       // no submissions yet
@@ -1249,7 +1546,7 @@ function BlueHeartsFormsApp({ onSignOut, userRole }) {
 
   const persistSchemas = async (next) => {
     try {
-      const res = await window.storage.set("form-schemas", JSON.stringify(next), true);
+      const res = await appStorage.set("form-schemas", JSON.stringify(next), true);
       return !!res;
     } catch (err) {
       console.error("Could not save form schemas", err);
@@ -1287,11 +1584,12 @@ function BlueHeartsFormsApp({ onSignOut, userRole }) {
             <button
               type="button"
               onClick={() => setView(view === "admin" ? "form" : "admin")}
-              className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0"
-              style={{ background: view === "admin" ? COLORS.heartDeep : COLORS.sand }}
-              title="Admin"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[12.5px] font-medium flex-shrink-0"
+              style={{ background: view === "admin" ? COLORS.heartDeep : COLORS.sand, color: view === "admin" ? "white" : COLORS.heartDeep }}
+              title="Manage forms and PDF templates"
             >
-              <ShieldCheck size={14} color={view === "admin" ? "white" : COLORS.heartDeep} />
+              <ShieldCheck size={14} />
+              Manage forms
             </button>
           )}
           <button
@@ -1480,6 +1778,8 @@ export default function App() {
   if (supabaseConfigError) return <ConfigurationScreen />;
   if (authLoading) return <main className="auth-page"><p className="auth-loading">Loading Friendly Forms...</p></main>;
   if (!session) return <LoginScreen onSubmit={signIn} loading={loginLoading} error={loginError} />;
-  const userRole = session.user.app_metadata?.role === "admin" ? "admin" : "employee";
+  const userRole = session.user.app_metadata?.role === "admin" || session.user.user_metadata?.role === "admin"
+    ? "admin"
+    : "employee";
   return <BlueHeartsFormsApp onSignOut={signOut} userRole={userRole} />;
 }
