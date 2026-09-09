@@ -842,8 +842,17 @@ async function generateUploadedTemplatePdf(template, schema, values) {
   }
 
   const positionedFields = fieldValues
-    .map(({ field, value }) => ({ field, value: formatPdfValue(field, value), placement: getPdfPlacement(template, schema, field) }))
+    .map(({ field, value }) => {
+      const placement = getPdfPlacement(template, schema, field, value);
+      return { field, value: placement?.value || formatPdfValue(field, value), placement };
+    })
     .filter(({ value, placement }) => placement && value !== undefined && value !== null && value !== "");
+  const unplacedFields = fieldValues
+    .map(({ field, value }) => {
+      const placement = getPdfPlacement(template, schema, field, value);
+      return { field, value: placement?.value || formatPdfValue(field, value), placement };
+    })
+    .filter(({ value, placement }) => !placement && value !== undefined && value !== null && value !== "");
   if (positionedFields.length > 0) {
     positionedFields.forEach(({ value, placement }) => {
       const page = pdf.getPages()[Number(placement.page || 1) - 1];
@@ -862,12 +871,15 @@ async function generateUploadedTemplatePdf(template, schema, values) {
         color,
       });
     });
-    return pdf.save();
+    if (unplacedFields.length === 0) return pdf.save();
   }
 
   const pages = pdf.getPages();
   const page = pages[pages.length - 1];
-  const lines = buildEmailBody(schema.fields, values).split("\n").filter(Boolean);
+  const lines = (positionedFields.length > 0
+    ? unplacedFields.map(({ field, value }) => `${field.label || field.id}: ${value}`)
+    : buildEmailBody(schema.fields, values).split("\n")
+  ).filter(Boolean);
   const lineHeight = 14;
   const maxLines = Math.floor((page.getHeight() - 72) / lineHeight);
   const visibleLines = lines.slice(0, maxLines - 1);
@@ -903,17 +915,41 @@ function formatPdfValue(field, value) {
   return value;
 }
 
-function getPdfPlacement(template, schema, field) {
+function getPdfPlacement(template, schema, field, value) {
   if (field.pdfPlacement) return field.pdfPlacement;
   if (!/pto|sick.?time/i.test(template.name || "") || !["timeoff", "sicktime"].includes(schema.id)) return null;
 
   const defaults = {
-    name: { page: 1, x: 76, y: 587, width: 180, fontSize: 11 },
-    date: { page: 1, x: 302, y: 587, width: 145, fontSize: 11 },
-    email: { page: 1, x: 76, y: 561, width: 180, fontSize: 11 },
-    phone: { page: 1, x: 302, y: 561, width: 145, fontSize: 11 },
-    signature: { page: 2, x: 76, y: 280, width: 180, fontSize: 13 },
+    name: { page: 1, x: 72, y: 594, width: 170, fontSize: 10 },
+    date: { page: 1, x: 290, y: 594, width: 140, fontSize: 10 },
+    email: { page: 1, x: 72, y: 568, width: 170, fontSize: 10 },
+    phone: { page: 1, x: 290, y: 568, width: 140, fontSize: 10 },
+    signature: { page: 2, x: 54, y: 420, width: 160, fontSize: 12 },
+    beginningOn: { page: 2, x: 108, y: 332, width: 125, fontSize: 10 },
+    numberOfHours: { page: 2, x: 282, y: 332, width: 145, fontSize: 10 },
+    endingOn: { page: 2, x: 92, y: 291, width: 125, fontSize: 10 },
+    returnToWork: { page: 2, x: 270, y: 291, width: 140, fontSize: 10 },
+    agree: { page: 2, x: 65, y: 466, width: 14, fontSize: 12 },
+    informed: { page: 3, x: /yes/i.test(String(value)) ? 253 : 47, y: 635, width: 14, fontSize: 12 },
+    supervisorDate: { page: 3, x: 44, y: 516, width: 125, fontSize: 10 },
+    supervisorName: { page: 3, x: 44, y: 472, width: 125, fontSize: 10 },
+    clientInfo: { page: 3, x: 211, y: 522, width: 130, fontSize: 10 },
+    reasonOther: { page: 3, x: 337, y: 267, width: 120, fontSize: 10 },
   };
+  if (field.id === "reason") {
+    const reasonPositions = {
+      "Sick Leave": { x: 55, y: 324 },
+      "Funeral/Family Loss": { x: 172, y: 324 },
+      "Medical Leave": { x: 291, y: 324 },
+      Vacation: { x: 55, y: 288 },
+      Maternity: { x: 172, y: 288 },
+      Other: { x: 291, y: 288 },
+      Personal: { x: 55, y: 250 },
+      "Jury Duty": { x: 172, y: 250 },
+    };
+    const position = reasonPositions[value];
+    return position ? { page: 3, ...position, width: 14, fontSize: 12, value: "X" } : null;
+  }
   return defaults[field.id] || null;
 }
 
