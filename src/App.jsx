@@ -841,6 +841,31 @@ async function generateUploadedTemplatePdf(template, schema, values) {
     return pdf.save();
   }
 
+  const positionedFields = fieldValues.filter(({ field, value }) =>
+    field.pdfPlacement && value !== undefined && value !== null && value !== ""
+  );
+  if (positionedFields.length > 0) {
+    positionedFields.forEach(({ field, value }) => {
+      const placement = field.pdfPlacement;
+      const page = pdf.getPages()[Number(placement.page || 1) - 1];
+      if (!page) return;
+      const size = Number(placement.fontSize) || 11;
+      const maxWidth = Number(placement.width) || 180;
+      const text = String(value);
+      const fitted = font.widthOfTextAtSize(text, size) > maxWidth
+        ? text.slice(0, Math.floor(text.length * (maxWidth / font.widthOfTextAtSize(text, size))))
+        : text;
+      page.drawText(fitted, {
+        x: Number(placement.x) || 0,
+        y: Number(placement.y) || 0,
+        size,
+        font,
+        color,
+      });
+    });
+    return pdf.save();
+  }
+
   const pages = pdf.getPages();
   const page = pages[pages.length - 1];
   const lines = buildEmailBody(schema.fields, values).split("\n").filter(Boolean);
@@ -1111,6 +1136,30 @@ function AdminFieldEditor({ field, onChange, onRemove, onMove, first, last, dept
             <Field label="PDF field name (optional)" hint="Use the internal field name from the uploaded fillable PDF when it differs from this field's id or label.">
               <TextInput value={field.pdfFieldName || ""} onChange={(e) => set({ pdfFieldName: e.target.value })} placeholder="e.g. employee_name" />
             </Field>
+          )}
+          {field.type !== "notice" && field.type !== "repeater" && (
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <Field label="PDF page">
+                <TextInput type="number" min="1" value={field.pdfPlacement?.page || ""} onChange={(e) => set({ pdfPlacement: { ...field.pdfPlacement, page: e.target.value } })} placeholder="1" />
+              </Field>
+              <Field label="X">
+                <TextInput type="number" min="0" value={field.pdfPlacement?.x || ""} onChange={(e) => set({ pdfPlacement: { ...field.pdfPlacement, x: e.target.value } })} placeholder="72" />
+              </Field>
+              <Field label="Y">
+                <TextInput type="number" min="0" value={field.pdfPlacement?.y || ""} onChange={(e) => set({ pdfPlacement: { ...field.pdfPlacement, y: e.target.value } })} placeholder="700" />
+              </Field>
+              <Field label="Width">
+                <TextInput type="number" min="1" value={field.pdfPlacement?.width || ""} onChange={(e) => set({ pdfPlacement: { ...field.pdfPlacement, width: e.target.value } })} placeholder="180" />
+              </Field>
+              <Field label="Font size">
+                <TextInput type="number" min="1" value={field.pdfPlacement?.fontSize || ""} onChange={(e) => set({ pdfPlacement: { ...field.pdfPlacement, fontSize: e.target.value } })} placeholder="11" />
+              </Field>
+            </div>
+          )}
+          {field.type !== "notice" && field.type !== "repeater" && (
+            <p className="text-[11.5px]" style={{ color: "#8A8378" }}>
+              For a flattened PDF, enter placement values above. Coordinates use PDF points from the bottom-left; leave PDF page blank unless this field should be drawn on the template.
+            </p>
           )}
           {["text", "email", "tel", "number", "textarea", "signature", "file"].includes(field.type) && (
             <Field label="Placeholder (optional)">
