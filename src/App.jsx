@@ -841,12 +841,11 @@ async function generateUploadedTemplatePdf(template, schema, values) {
     return pdf.save();
   }
 
-  const positionedFields = fieldValues.filter(({ field, value }) =>
-    field.pdfPlacement && value !== undefined && value !== null && value !== ""
-  );
+  const positionedFields = fieldValues
+    .map(({ field, value }) => ({ field, value: formatPdfValue(field, value), placement: getPdfPlacement(template, schema, field) }))
+    .filter(({ value, placement }) => placement && value !== undefined && value !== null && value !== "");
   if (positionedFields.length > 0) {
-    positionedFields.forEach(({ field, value }) => {
-      const placement = field.pdfPlacement;
+    positionedFields.forEach(({ value, placement }) => {
       const page = pdf.getPages()[Number(placement.page || 1) - 1];
       if (!page) return;
       const size = Number(placement.fontSize) || 11;
@@ -892,6 +891,30 @@ async function generateUploadedTemplatePdf(template, schema, values) {
   });
 
   return pdf.save();
+}
+
+function formatPdfValue(field, value) {
+  if (field.type === "date" && value) {
+    const [year, month, day] = String(value).split("-");
+    return year && month && day ? `${month}/${day}/${year}` : value;
+  }
+  if (field.type === "checkbox") return value ? "X" : "";
+  if (field.type === "chips-multi") return (value || []).join(", ");
+  return value;
+}
+
+function getPdfPlacement(template, schema, field) {
+  if (field.pdfPlacement) return field.pdfPlacement;
+  if (!/pto|sick.?time/i.test(template.name || "") || !["timeoff", "sicktime"].includes(schema.id)) return null;
+
+  const defaults = {
+    name: { page: 1, x: 76, y: 587, width: 180, fontSize: 11 },
+    date: { page: 1, x: 302, y: 587, width: 145, fontSize: 11 },
+    email: { page: 1, x: 76, y: 561, width: 180, fontSize: 11 },
+    phone: { page: 1, x: 302, y: 561, width: 145, fontSize: 11 },
+    signature: { page: 2, x: 76, y: 280, width: 180, fontSize: 13 },
+  };
+  return defaults[field.id] || null;
 }
 
 function normalizePdfFieldName(value) {
