@@ -825,6 +825,7 @@ async function generateUploadedTemplatePdf(template, schema, values) {
   const form = pdf.getForm();
   const pdfFields = form.getFields();
   const fieldValues = flattenPdfValues(schema.fields, values);
+  const filledAppFields = new Set();
   let filledFields = 0;
 
   pdfFields.forEach((pdfField) => {
@@ -841,23 +842,21 @@ async function generateUploadedTemplatePdf(template, schema, values) {
       } else if (typeof pdfField.setText === "function") {
         pdfField.setText(String(appField.value));
       }
+      filledAppFields.add(appField.field);
       filledFields += 1;
     } catch (error) {
       console.warn(`Could not fill PDF field "${name}"`, error);
     }
   });
 
-  if (filledFields > 0) {
-    form.updateFieldAppearances(font);
-    return pdf.save();
-  }
+  if (filledFields > 0) form.updateFieldAppearances(font);
 
   const positionedFields = fieldValues
-    .map(({ field, value }) => {
-      const placement = getPdfPlacement(template, schema, field, value);
+    .map(({ field, value, rowIndex }) => {
+      const placement = getPdfPlacement(template, schema, field, value, rowIndex);
       return { field, value: placement?.value || formatPdfValue(field, value), placement };
     })
-    .filter(({ value, placement }) => placement && value !== undefined && value !== null && value !== "");
+    .filter(({ field, value, placement }) => placement && !filledAppFields.has(field) && value !== undefined && value !== null && value !== "");
   const unplacedFields = fieldValues
     .map(({ field, value }) => {
       const placement = getPdfPlacement(template, schema, field, value);
@@ -868,10 +867,10 @@ async function generateUploadedTemplatePdf(template, schema, values) {
     positionedFields.forEach(({ value, placement }) => {
       drawPdfField(pdf, font, color, value, placement);
     });
-    if (unplacedFields.length === 0) return pdf.save();
+    return pdf.save();
   }
 
-  drawUnplacedPdfFields(pdf, font, color, unplacedFields);
+  if (filledFields === 0) drawUnplacedPdfFields(pdf, font, color, unplacedFields);
 
   return pdf.save();
 }
@@ -922,8 +921,12 @@ function formatPdfValue(field, value) {
   return value;
 }
 
-function getPdfPlacement(template, schema, field, value) {
-  if (field.pdfPlacement) return field.pdfPlacement;
+function getPdfPlacement(template, schema, field, value, rowIndex = 0) {
+  if (field.pdfPlacement) {
+    const placement = { ...field.pdfPlacement };
+    if (placement.rowHeight && rowIndex) placement.y = Number(placement.y) - Number(placement.rowHeight) * rowIndex;
+    return placement;
+  }
   if (!/pto|sick.?time/i.test(template.name || "") || !["timeoff", "sicktime"].includes(schema.id)) return null;
 
   const defaults = {
@@ -1167,6 +1170,24 @@ function PdfPlacementEditor({ schema, template, onChange }) {
               </select>
             </label>
             {selectedField && <span className="text-[12px]" style={{ color: COLORS.heartDeep }}>Click the page to place “{selectedField.label}”.</span>}
+            {selectedField && (
+              <label className="text-[12px]" style={{ color: COLORS.ink }}>
+                Row height
+                <input
+                  type="number"
+                  min="0"
+                  value={selectedField.field.pdfPlacement?.rowHeight || ""}
+                  onChange={(event) => onChange({
+                    fields: updateFieldAtPath(schema.fields, selectedField.path, {
+                      pdfPlacement: { ...(selectedField.field.pdfPlacement || {}), rowHeight: event.target.value },
+                    }),
+                  })}
+                  placeholder="0"
+                  className="ml-2 w-16 rounded border px-2 py-1"
+                  style={{ borderColor: COLORS.line }}
+                />
+              </label>
+            )}
           </div>
           <div className="overflow-auto rounded border p-2" style={{ borderColor: COLORS.line, background: "#DAD6CE", minHeight: 260 }}>
             {loading && <div className="text-[12px] p-3" style={{ color: COLORS.heartDeep }}>Rendering PDF…</div>}
