@@ -28,6 +28,10 @@ import {
 } from "lucide-react";
 import { supabase, supabaseConfigError } from "./lib/supabase";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import * as pdfjsLib from "pdfjs-dist";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const browserTemplateStorage = {
   dbPromise: null,
@@ -1036,6 +1040,145 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function listPdfPlacementFields(fields, path = []) {
+  return fields.flatMap((field, index) => {
+    const nextPath = [...path, index];
+    if (field.type === "notice") return [];
+    if (field.type === "repeater") {
+      return listPdfPlacementFields(field.fields || [], nextPath.concat("fields"));
+    }
+    return [{ field, path: nextPath, label: field.label || field.id }];
+  });
+}
+
+function updateFieldAtPath(fields, path, patch) {
+  const [head, ...rest] = path;
+  return fields.map((field, index) => {
+    if (index !== head) return field;
+    if (rest.length === 0) return { ...field, ...patch };
+    if (rest[0] === "fields") {
+      return { ...field, fields: updateFieldAtPath(field.fields || [], rest.slice(1), patch) };
+    }
+    return field;
+  });
+}
+
+function PdfPlacementEditor({ schema, template, onChange }) {
+  const canvasRef = useRef(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [pageCount, setPageCount] = useState(0);
+  const [pageSize, setPageSize] = useState({ width: 612, height: 792 });
+  const [scale, setScale] = useState(1.25);
+  const [selectedPath, setSelectedPath] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const placementFields = listPdfPlacementFields(schema.fields);
+  const selectedField = placementFields.find(({ path }) => JSON.stringify(path) === JSON.stringify(selectedPath));
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!template?.dataUrl || !canvasRef.current) return undefined;
+    setLoading(true);
+    setError("");
+    pdfjsLib.getDocument(template.dataUrl).promise
+      .then(async (pdf) => {
+        if (cancelled) return;
+        setPageCount(pdf.numPages);
+        const page = await pdf.getPage(pageNumber);
+        const viewport = page.getViewport({ scale });
+        const canvas = canvasRef.current;
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        setPageSize({ width: page.view[2], height: page.view[3] });
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+      })
+      .catch((renderError) => {
+        if (!cancelled) setError("Could not render this PDF. Try uploading it again.");
+        console.error("Could not render PDF template", renderError);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [template, pageNumber, scale]);
+
+  const placeSelectedField = (event) => {
+    if (!selectedField || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * (canvasRef.current.width / rect.width) / scale;
+    const yFromTop = (event.clientY - rect.top) * (canvasRef.current.height / rect.height) / scale;
+    const placement = {
+      ...(selectedField.field.pdfPlacement || {}),
+      page: pageNumber,
+      x: Math.round(x),
+      y: Math.round(pageSize.height - yFromTop),
+      width: selectedField.field.pdfPlacement?.width || 180,
+      fontSize: selectedField.field.pdfPlacement?.fontSize || 11,
+    };
+    onChange({ fields: updateFieldAtPath(schema.fields, selectedField.path, { pdfPlacement: placement }) });
+  };
+
+  if (!template?.dataUrl) return null;
+  return (
+    <div className="mt-4 rounded-lg p-3 space-y-3" style={{ border: `1px solid ${COLORS.line}`, background: COLORS.paper }}>
+      <div>
+        <div className="text-[13px] font-semibold" style={{ color: COLORS.ink }}>Place fields on PDF</div>
+        <div className="text-[12px]" style={{ color: "#8A8378" }}>
+          Select a field, then click where its text should begin. Coordinates are saved in PDF points.
+        </div>
+      </div>
+      <div className="grid lg:grid-cols-[220px_minmax(0,1fr)] gap-3 items-start">
+        <div className="space-y-1 max-h-64 overflow-auto pr-1">
+          {placementFields.map(({ field, path, label }) => {
+            const key = JSON.stringify(path);
+            const placement = field.pdfPlacement;
+            return (
+              <button
+                type="button"
+                key={key}
+                onClick={() => setSelectedPath(path)}
+                className="w-full text-left rounded-md px-2.5 py-2 text-[12px]"
+                style={{
+                  border: `1px solid ${key === JSON.stringify(selectedPath) ? COLORS.heartDeep : COLORS.line}`,
+                  background: key === JSON.stringify(selectedPath) ? "#EAF3EC" : "white",
+                  color: COLORS.ink,
+                }}
+              >
+                <span className="block truncate">{label}</span>
+                <span className="block text-[10px]" style={{ color: placement ? COLORS.good : "#8A8378" }}>
+                  {placement ? `Page ${placement.page}, X ${placement.x}, Y ${placement.y}` : "Not placed"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="space-y-2 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="text-[12px]" style={{ color: COLORS.ink }}>
+              Page
+              <select value={pageNumber} onChange={(event) => setPageNumber(Number(event.target.value))} className="ml-2 rounded border px-2 py-1" style={{ borderColor: COLORS.line }}>
+                {Array.from({ length: pageCount || 1 }, (_, index) => <option key={index + 1} value={index + 1}>{index + 1}</option>)}
+              </select>
+            </label>
+            <label className="text-[12px]" style={{ color: COLORS.ink }}>
+              Zoom
+              <select value={scale} onChange={(event) => setScale(Number(event.target.value))} className="ml-2 rounded border px-2 py-1" style={{ borderColor: COLORS.line }}>
+                {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{Math.round(value * 100)}%</option>)}
+              </select>
+            </label>
+            {selectedField && <span className="text-[12px]" style={{ color: COLORS.heartDeep }}>Click the page to place “{selectedField.label}”.</span>}
+          </div>
+          <div className="overflow-auto rounded border p-2" style={{ borderColor: COLORS.line, background: "#DAD6CE", minHeight: 260 }}>
+            {loading && <div className="text-[12px] p-3" style={{ color: COLORS.heartDeep }}>Rendering PDF…</div>}
+            {error && <div className="text-[12px] p-3" style={{ color: COLORS.bad }}>{error}</div>}
+            <canvas ref={canvasRef} onClick={placeSelectedField} className="block max-w-full h-auto mx-auto" style={{ cursor: selectedField ? "crosshair" : "default" }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 async function loadBundledTemplate(schemaId) {
   if (!["timeoff", "sicktime"].includes(schemaId)) return null;
   const response = await fetch("/templates/PTO, Sick Time Request Form 2026.pdf", { cache: "no-store" });
@@ -1476,9 +1619,10 @@ function AdminFormCard({ schema, onChange, onRemove, onMove, first, last }) {
   );
 }
 
-function TemplateManager({ schemas }) {
+function TemplateManager({ schemas, onSchemaChange }) {
   const [templates, setTemplates] = useState({});
   const [status, setStatus] = useState("");
+  const [editingId, setEditingId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1550,9 +1694,29 @@ function TemplateManager({ schemas }) {
               <input type="file" accept="application/pdf" onChange={(event) => upload(schema, event)} className="hidden" />
             </label>
             {templates[schema.id] && (
-              <button type="button" onClick={() => remove(schema)} className="text-[12.5px] font-medium" style={{ color: COLORS.bad }}>
-                Remove
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setEditingId((current) => current === schema.id ? null : schema.id)}
+                  className="inline-flex items-center gap-1 text-[12.5px] font-medium"
+                  style={{ color: COLORS.heartDeep }}
+                >
+                  <Pencil size={13} />
+                  {editingId === schema.id ? "Close editor" : "Place fields"}
+                </button>
+                <button type="button" onClick={() => remove(schema)} className="text-[12.5px] font-medium" style={{ color: COLORS.bad }}>
+                  Remove
+                </button>
+              </>
+            )}
+            {editingId === schema.id && (
+              <div className="basis-full">
+                <PdfPlacementEditor
+                  schema={schema}
+                  template={templates[schema.id]}
+                  onChange={(patch) => onSchemaChange(schema.id, patch)}
+                />
+              </div>
             )}
           </div>
         ))}
@@ -1631,7 +1795,10 @@ function AdminPanel({ schemas, setSchemas, persist, onLock }) {
         ))}
       </div>
 
-      <TemplateManager schemas={draft} />
+      <TemplateManager
+        schemas={draft}
+        onSchemaChange={(id, patch) => setDraft((current) => current.map((schema) => schema.id === id ? { ...schema, ...patch } : schema))}
+      />
 
       <div className="rounded-xl p-4 flex flex-col sm:flex-row gap-2 sm:items-end" style={{ border: `1px dashed ${COLORS.line}` }}>
         <Field label="New form name" span>
