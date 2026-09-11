@@ -815,7 +815,7 @@ async function generateMealWaiverPdf(values) {
 }
 
 async function generateUploadedTemplatePdf(template, schema, values) {
-  const pdf = await PDFDocument.load(template.dataUrl);
+  const pdf = await PDFDocument.load(template.bytes || template.dataUrl);
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const color = rgb(0.05, 0.2, 0.45);
   const form = pdf.getForm();
@@ -825,15 +825,13 @@ async function generateUploadedTemplatePdf(template, schema, values) {
 
   pdfFields.forEach((pdfField) => {
     const name = pdfField.getName();
-    const appField = fieldValues.find(({ field }) =>
-      [field.pdfFieldName, field.id, field.label].filter(Boolean).some((candidate) => normalizePdfFieldName(candidate) === normalizePdfFieldName(name))
-    );
+    const appField = findPdfFieldValue(fieldValues, name);
     if (!appField || appField.value === undefined || appField.value === null || appField.value === "") return;
 
     try {
       const fieldType = pdfField.constructor.name;
       if (fieldType === "PDFCheckBox") {
-        if (appField.value) pdfField.check();
+        if (appField.value === true || appField.value === appField.option) pdfField.check();
       } else if (fieldType === "PDFDropdown" || fieldType === "PDFOptionList" || fieldType === "PDFRadioGroup") {
         pdfField.select(String(Array.isArray(appField.value) ? appField.value[0] : appField.value));
       } else if (typeof pdfField.setText === "function") {
@@ -962,6 +960,33 @@ function normalizePdfFieldName(value) {
   return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+function findPdfFieldValue(fieldValues, pdfName) {
+  const normalizedName = normalizePdfFieldName(pdfName);
+  for (const appField of fieldValues) {
+    const field = appField.field;
+    const names = [field.pdfFieldName, field.id, field.label, ...(field.pdfFieldNames || [])]
+      .filter(Boolean);
+    if (names.some((candidate) => normalizePdfFieldName(candidate) === normalizedName)) return appField;
+
+    if (field.type === "chips" || field.type === "chips-multi") {
+      const selected = field.type === "chips-multi"
+        ? appField.rawValue || []
+        : [appField.rawValue];
+      const option = (field.options || []).find((candidate) => {
+        const optionNames = [
+          candidate,
+          `${field.id}_${candidate}`,
+          `${field.id}_${appField.rowIndex + 1}_${candidate}`,
+          `${field.label}_${candidate}`,
+        ];
+        return optionNames.some((nameCandidate) => normalizePdfFieldName(nameCandidate) === normalizedName);
+      });
+      if (option) return { ...appField, value: selected.includes(option), option };
+    }
+  }
+  return null;
+}
+
 function flattenPdfValues(fields, values, result = []) {
   fields.forEach((field) => {
     if (field.type === "notice") return;
@@ -970,8 +995,16 @@ function flattenPdfValues(fields, values, result = []) {
         flattenPdfValues(
           field.fields.map((child) => ({
             ...child,
+            sourceId: child.id,
             id: `${field.id}_${index + 1}_${child.id}`,
             label: `${field.label || field.id} ${index + 1} ${child.label || child.id}`,
+            pdfFieldNames: [
+              child.pdfFieldName,
+              child.id,
+              child.label,
+              `${child.id}_${index + 1}`,
+              `${index + 1}_${child.id}`,
+            ].filter(Boolean),
           })),
           row,
           result
@@ -980,11 +1013,16 @@ function flattenPdfValues(fields, values, result = []) {
       return;
     }
     const value = field.type === "checkbox"
-      ? values[field.id]
+      ? values[field.sourceId || field.id]
       : field.type === "chips-multi"
-        ? (values[field.id] || []).join(", ")
-        : values[field.id];
-    result.push({ field, value });
+        ? (values[field.sourceId || field.id] || []).join(", ")
+        : values[field.sourceId || field.id];
+    result.push({
+      field,
+      value,
+      rawValue: values[field.sourceId || field.id],
+      rowIndex: field.id.match(/_(\d+)_/)?.[1] ? Number(field.id.match(/_(\d+)_/)[1]) - 1 : undefined,
+    });
   });
   return result;
 }
@@ -996,6 +1034,16 @@ function readFileAsDataUrl(file) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+async function loadBundledTemplate(schemaId) {
+  if (!["timeoff", "sicktime"].includes(schemaId)) return null;
+  const response = await fetch("/templates/PTO, Sick Time Request Form 2026.pdf", { cache: "no-store" });
+  if (!response.ok) throw new Error("The bundled PTO/Sick Time PDF template could not be loaded.");
+  return {
+    name: "PTO, Sick Time Request Form 2026.pdf",
+    bytes: new Uint8Array(await response.arrayBuffer()),
+  };
 }
 
 function FormRenderer({ schema, onSubmitted }) {
@@ -1015,13 +1063,21 @@ function FormRenderer({ schema, onSubmitted }) {
 
   useEffect(() => {
     let cancelled = false;
-    appStorage.get(`form-template:${schema.id}`, true).then((res) => {
-      if (!cancelled && res && res.value) {
+    appStorage.get(`form-template:${schema.id}`, true).then(async (res) => {
+      if (cancelled) return;
+      if (res && res.value) {
         try {
           setTemplate(JSON.parse(res.value));
+          return;
         } catch (error) {
           console.error("Could not load form template", error);
         }
+      }
+      try {
+        const bundledTemplate = await loadBundledTemplate(schema.id);
+        if (!cancelled) setTemplate(bundledTemplate);
+      } catch (error) {
+        console.error("Could not load bundled form template", error);
       }
     }).catch(() => {});
     return () => { cancelled = true; };
@@ -1037,7 +1093,7 @@ function FormRenderer({ schema, onSubmitted }) {
     setPdfError("");
 
     if (requiresPdf) {
-      if (schema.id !== "mealwaiver" && !template) {
+      if (!template) {
         setPdfError(`Please upload the ${schema.label} PDF template before generating this form.`);
         setSubmitting(false);
         return;
