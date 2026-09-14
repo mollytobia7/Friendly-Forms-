@@ -1043,6 +1043,12 @@ function readFileAsDataUrl(file) {
   });
 }
 
+async function dataUrlToPdfBytes(dataUrl) {
+  const response = await fetch(dataUrl);
+  if (!response.ok) throw new Error("The uploaded PDF could not be read.");
+  return new Uint8Array(await response.arrayBuffer());
+}
+
 function listPdfPlacementFields(fields, path = []) {
   return fields.flatMap((field, index) => {
     const nextPath = [...path, index];
@@ -1083,7 +1089,8 @@ function PdfPlacementEditor({ schema, template, onChange }) {
     if (!template?.dataUrl || !canvasRef.current) return undefined;
     setLoading(true);
     setError("");
-    pdfjsLib.getDocument(template.dataUrl).promise
+    dataUrlToPdfBytes(template.dataUrl)
+      .then((data) => pdfjsLib.getDocument({ data }).promise)
       .then(async (pdf) => {
         if (cancelled) return;
         setPageCount(pdf.numPages);
