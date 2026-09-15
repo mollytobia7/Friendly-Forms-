@@ -972,8 +972,11 @@ function getPdfPlacement(template, schema, field, value, rowIndex = 0) {
 }
 
 function getPdfPlacements(template, schema, field, value, rawValue, rowIndex = 0) {
-  if (field.type === "chips-multi" && Array.isArray(rawValue) && field.pdfPlacement?.optionPlacements) {
-    return rawValue
+  if ((field.type === "chips" || field.type === "chips-multi") && field.pdfPlacement?.optionPlacements) {
+    const selectedOptions = field.type === "chips-multi"
+      ? (Array.isArray(rawValue) ? rawValue : [])
+      : (rawValue ? [rawValue] : []);
+    return selectedOptions
       .map((option) => {
         const placement = field.pdfPlacement.optionPlacements[option];
         return placement ? { ...placement, value: "X" } : null;
@@ -1147,7 +1150,7 @@ function PdfPlacementEditor({ schema, template, onChange }) {
       width: selectedField.field.pdfPlacement?.width || 180,
       fontSize: selectedField.field.pdfPlacement?.fontSize || 11,
     };
-    if (selectedField.field.type === "chips-multi" && selectedOption) {
+    if ((selectedField.field.type === "chips" || selectedField.field.type === "chips-multi") && selectedOption) {
       const optionPlacements = selectedField.field.pdfPlacement?.optionPlacements || {};
       onChange({
         fields: updateFieldAtPath(schema.fields, selectedField.path, {
@@ -1182,7 +1185,7 @@ function PdfPlacementEditor({ schema, template, onChange }) {
                 key={key}
                 onClick={() => {
                   setSelectedPath(path);
-                  setSelectedOption(field.type === "chips-multi" ? field.options?.[0] || null : null);
+                  setSelectedOption(field.type === "chips" || field.type === "chips-multi" ? field.options?.[0] || null : null);
                 }}
                 className="w-full text-left rounded-md px-2.5 py-2 text-[12px]"
                 style={{
@@ -1213,7 +1216,7 @@ function PdfPlacementEditor({ schema, template, onChange }) {
                 {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{Math.round(value * 100)}%</option>)}
               </select>
             </label>
-            {selectedField && selectedField.field.type === "chips-multi" && (
+            {selectedField && (selectedField.field.type === "chips" || selectedField.field.type === "chips-multi") && (
               <div className="flex flex-wrap items-center gap-1">
                 <span className="text-[12px]" style={{ color: COLORS.ink }}>Option:</span>
                 {(selectedField.field.options || []).map((option) => {
@@ -1238,10 +1241,10 @@ function PdfPlacementEditor({ schema, template, onChange }) {
             )}
             {selectedField && (
               <span className="text-[12px]" style={{ color: COLORS.heartDeep }}>
-                Click the page to place {selectedField.field.type === "chips-multi" ? `“${selectedOption}”` : `“${selectedField.label}”`}.
+                Click the page to place {selectedField.field.type === "chips" || selectedField.field.type === "chips-multi" ? `“${selectedOption}”` : `“${selectedField.label}”`}.
               </span>
             )}
-            {selectedField && selectedField.field.type !== "chips-multi" && (
+            {selectedField && selectedField.field.type !== "chips" && selectedField.field.type !== "chips-multi" && (
               <label className="text-[12px]" style={{ color: COLORS.ink }}>
                 Row height
                 <input
@@ -1430,11 +1433,22 @@ function ComingSoon({ label }) {
 
 // ---------- admin: field editor ----------
 function OptionsEditor({ options, onChange }) {
+  const [text, setText] = useState((options || []).join(", "));
+
+  useEffect(() => {
+    setText((options || []).join(", "));
+  }, [options]);
+
+  const commit = () => {
+    onChange(text.split(",").map((option) => option.trim()).filter(Boolean));
+  };
+
   return (
     <Field label="Options (comma-separated)">
       <TextInput
-        value={(options || []).join(", ")}
-        onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
         placeholder="Option A, Option B, Option C"
       />
     </Field>
