@@ -917,7 +917,7 @@ function formatPdfValue(field, value) {
     return year && month && day ? `${month}/${day}/${year}` : value;
   }
   if (field.type === "checkbox") return value ? "X" : "";
-  if (field.type === "chips-multi") return (value || []).join(", ");
+  if (field.type === "chips-multi") return Array.isArray(value) ? value.join(", ") : String(value || "");
   return value;
 }
 
