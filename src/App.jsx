@@ -67,11 +67,21 @@ const browserTemplateStorage = {
 const appStorage = {
   async get(key, shared = false) {
     if (key.startsWith("form-template:")) return browserTemplateStorage.get(key);
+    if (shared && key === "form-schemas" && supabase) {
+      const { data, error } = await supabase.from("app_settings").select("value").eq("key", key).maybeSingle();
+      if (error) throw error;
+      return { value: data ? JSON.stringify(data.value) : null };
+    }
     if (window.storage) return window.storage.get(key, shared);
     return { value: window.localStorage.getItem(key) };
   },
   async set(key, value, shared = false) {
     if (key.startsWith("form-template:")) return browserTemplateStorage.set(key, value);
+    if (shared && key === "form-schemas" && supabase) {
+      const { data, error } = await supabase.from("app_settings").upsert({ key, value: JSON.parse(value) }).select("key").single();
+      if (error) throw error;
+      return data;
+    }
     if (window.storage) return window.storage.set(key, value, shared);
     window.localStorage.setItem(key, value);
     return { key, value };
