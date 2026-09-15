@@ -852,11 +852,9 @@ async function generateUploadedTemplatePdf(template, schema, values) {
   if (filledFields > 0) form.updateFieldAppearances(font);
 
   const positionedFields = fieldValues
-    .map(({ field, value, rowIndex }) => {
-      const placement = getPdfPlacement(template, schema, field, value, rowIndex);
-      return { field, value: placement?.value || formatPdfValue(field, value), placement };
-    })
-    .filter(({ field, value, placement }) => placement && !filledAppFields.has(field) && value !== undefined && value !== null && value !== "");
+    .flatMap(({ field, value, rawValue, rowIndex }) => getPdfPlacements(template, schema, field, value, rawValue, rowIndex)
+      .map((placement) => ({ field, value: placement.value || formatPdfValue(field, value), placement })))
+    .filter(({ field, value }) => !filledAppFields.has(field) && value !== undefined && value !== null && value !== "");
   const unplacedFields = fieldValues
     .map(({ field, value }) => {
       const placement = getPdfPlacement(template, schema, field, value);
@@ -961,6 +959,19 @@ function getPdfPlacement(template, schema, field, value, rowIndex = 0) {
     return position ? { page: 3, ...position, width: 14, fontSize: 12, value: "X" } : null;
   }
   return defaults[field.id] || null;
+}
+
+function getPdfPlacements(template, schema, field, value, rawValue, rowIndex = 0) {
+  if (field.type === "chips-multi" && Array.isArray(rawValue) && field.pdfPlacement?.optionPlacements) {
+    return rawValue
+      .map((option) => {
+        const placement = field.pdfPlacement.optionPlacements[option];
+        return placement ? { ...placement, value: "X" } : null;
+      })
+      .filter(Boolean);
+  }
+  const placement = getPdfPlacement(template, schema, field, value, rowIndex);
+  return placement ? [placement] : [];
 }
 
 function normalizePdfFieldName(value) {
@@ -1079,6 +1090,7 @@ function PdfPlacementEditor({ schema, template, onChange }) {
   const [pageSize, setPageSize] = useState({ width: 612, height: 792 });
   const [scale, setScale] = useState(1.25);
   const [selectedPath, setSelectedPath] = useState(null);
+  const [selectedOption, setSelectedOption] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const placementFields = listPdfPlacementFields(schema.fields);
@@ -1125,6 +1137,18 @@ function PdfPlacementEditor({ schema, template, onChange }) {
       width: selectedField.field.pdfPlacement?.width || 180,
       fontSize: selectedField.field.pdfPlacement?.fontSize || 11,
     };
+    if (selectedField.field.type === "chips-multi" && selectedOption) {
+      const optionPlacements = selectedField.field.pdfPlacement?.optionPlacements || {};
+      onChange({
+        fields: updateFieldAtPath(schema.fields, selectedField.path, {
+          pdfPlacement: {
+            ...(selectedField.field.pdfPlacement || {}),
+            optionPlacements: { ...optionPlacements, [selectedOption]: { ...placement, value: "X" } },
+          },
+        }),
+      });
+      return;
+    }
     onChange({ fields: updateFieldAtPath(schema.fields, selectedField.path, { pdfPlacement: placement }) });
   };
 
@@ -1146,7 +1170,10 @@ function PdfPlacementEditor({ schema, template, onChange }) {
               <button
                 type="button"
                 key={key}
-                onClick={() => setSelectedPath(path)}
+                onClick={() => {
+                  setSelectedPath(path);
+                  setSelectedOption(field.type === "chips-multi" ? field.options?.[0] || null : null);
+                }}
                 className="w-full text-left rounded-md px-2.5 py-2 text-[12px]"
                 style={{
                   border: `1px solid ${key === JSON.stringify(selectedPath) ? COLORS.heartDeep : COLORS.line}`,
@@ -1176,8 +1203,35 @@ function PdfPlacementEditor({ schema, template, onChange }) {
                 {[0.75, 1, 1.25, 1.5, 2].map((value) => <option key={value} value={value}>{Math.round(value * 100)}%</option>)}
               </select>
             </label>
-            {selectedField && <span className="text-[12px]" style={{ color: COLORS.heartDeep }}>Click the page to place “{selectedField.label}”.</span>}
+            {selectedField && selectedField.field.type === "chips-multi" && (
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-[12px]" style={{ color: COLORS.ink }}>Option:</span>
+                {(selectedField.field.options || []).map((option) => {
+                  const placed = selectedField.field.pdfPlacement?.optionPlacements?.[option];
+                  return (
+                    <button
+                      type="button"
+                      key={option}
+                      onClick={() => setSelectedOption(option)}
+                      className="rounded border px-2 py-1 text-[11px]"
+                      style={{
+                        borderColor: selectedOption === option ? COLORS.heartDeep : COLORS.line,
+                        background: selectedOption === option ? "#EAF3EC" : "white",
+                        color: placed ? COLORS.good : COLORS.ink,
+                      }}
+                    >
+                      {option}{placed ? " ✓" : ""}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {selectedField && (
+              <span className="text-[12px]" style={{ color: COLORS.heartDeep }}>
+                Click the page to place {selectedField.field.type === "chips-multi" ? `“${selectedOption}”` : `“${selectedField.label}”`}.
+              </span>
+            )}
+            {selectedField && selectedField.field.type !== "chips-multi" && (
               <label className="text-[12px]" style={{ color: COLORS.ink }}>
                 Row height
                 <input
