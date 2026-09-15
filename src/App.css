@@ -872,6 +872,19 @@ button[style*="background"] { border: 0; }
 
 .auth-submit:disabled { opacity: .65; cursor: wait; }
 
+.auth-link {
+  margin: 6px auto 0;
+  border: 0;
+  color: var(--ff-blue-dark);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-link:hover { color: var(--ff-blue); }
+
 .auth-error {
   margin: 10px 0 0;
   padding: 10px 12px;
@@ -879,6 +892,16 @@ button[style*="background"] { border: 0; }
   border-radius: 7px;
   color: #a34d42;
   background: #fff5f2;
+  font-size: 13px;
+}
+
+.auth-success {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border: 1px solid #c8e4d1;
+  border-radius: 7px;
+  color: #397451;
+  background: #f1faf3;
   font-size: 13px;
 }
 

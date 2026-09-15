@@ -1420,19 +1420,11 @@ function ComingSoon({ label }) {
 
 // ---------- admin: field editor ----------
 function OptionsEditor({ options, onChange }) {
-  const text = (options || []).join(", ");
   return (
     <Field label="Options (comma-separated)">
       <TextInput
-        defaultValue={text}
-        onBlur={(e) =>
-          onChange(
-            e.target.value
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-          )
-        }
+        value={(options || []).join(", ")}
+        onChange={(e) => onChange(e.target.value.split(",").map((s) => s.trim()).filter(Boolean))}
         placeholder="Option A, Option B, Option C"
       />
     </Field>
@@ -2103,7 +2095,7 @@ function BlueHeartsFormsApp({ onSignOut, userRole }) {
   );
 }
 
-function LoginScreen({ onSubmit, loading, error }) {
+function LoginScreen({ onSubmit, onForgotPassword, loading, error }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -2128,7 +2120,94 @@ function LoginScreen({ onSubmit, loading, error }) {
           <button className="auth-submit" type="submit" disabled={loading}>
             {loading ? "Signing in..." : "Sign in"}
           </button>
+          <button className="auth-link" type="button" onClick={onForgotPassword}>
+            Forgot your password?
+          </button>
         </form>
+      </section>
+    </main>
+  );
+}
+
+function ForgotPasswordScreen({ onSubmit, onBack, loading, error, sent }) {
+  const [email, setEmail] = useState("");
+
+  const submit = (event) => {
+    event.preventDefault();
+    onSubmit(email);
+  };
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card" aria-labelledby="forgot-password-title">
+        <div className="auth-brand-mark"><Heart size={25} color="white" fill="white" /></div>
+        <p className="auth-eyebrow">Account access</p>
+        <h1 id="forgot-password-title">Reset your password</h1>
+        <p className="auth-copy">Enter your email and we’ll send you a secure link to create a new password.</p>
+        {sent ? (
+          <>
+            <p className="auth-success" role="status">Check your email for the password reset link.</p>
+            <button className="auth-link" type="button" onClick={onBack}>Return to sign in</button>
+          </>
+        ) : (
+          <form onSubmit={submit} className="auth-form">
+            <label htmlFor="reset-email">Email</label>
+            <input id="reset-email" type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required />
+            {error && <p className="auth-error" role="alert">{error}</p>}
+            <button className="auth-submit" type="submit" disabled={loading}>
+              {loading ? "Sending link..." : "Send reset link"}
+            </button>
+            <button className="auth-link" type="button" onClick={onBack}>Return to sign in</button>
+          </form>
+        )}
+      </section>
+    </main>
+  );
+}
+
+function ResetPasswordScreen({ onSubmit, onSignOut, loading, error, success }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [formError, setFormError] = useState("");
+
+  const submit = (event) => {
+    event.preventDefault();
+    if (password.length < 6) {
+      setFormError("Your password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirmation) {
+      setFormError("The passwords do not match.");
+      return;
+    }
+    setFormError("");
+    onSubmit(password);
+  };
+
+  return (
+    <main className="auth-page">
+      <section className="auth-card" aria-labelledby="reset-password-title">
+        <div className="auth-brand-mark"><Heart size={25} color="white" fill="white" /></div>
+        <p className="auth-eyebrow">Secure account update</p>
+        <h1 id="reset-password-title">Create a new password</h1>
+        <p className="auth-copy">Choose a new password for your Friendly Forms account.</p>
+        {success ? (
+          <>
+            <p className="auth-success" role="status">Your password has been updated.</p>
+            <button className="auth-submit" type="button" onClick={onSignOut}>Continue to sign in</button>
+          </>
+        ) : (
+          <form onSubmit={submit} className="auth-form">
+            <label htmlFor="new-password">New password</label>
+            <input id="new-password" type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={6} required />
+            <label htmlFor="confirm-password">Confirm new password</label>
+            <input id="confirm-password" type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength={6} required />
+            {(formError || error) && <p className="auth-error" role="alert">{formError || error}</p>}
+            <button className="auth-submit" type="submit" disabled={loading}>
+              {loading ? "Updating password..." : "Update password"}
+            </button>
+          </form>
+        )}
       </section>
     </main>
   );
@@ -2152,6 +2231,13 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [authView, setAuthView] = useState(() => window.location.hash.includes("type=recovery") ? "reset" : "login");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError, setResetError] = useState("");
+  const [resetSuccess, setResetSuccess] = useState(false);
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotError, setForgotError] = useState("");
+  const [forgotSent, setForgotSent] = useState(false);
 
   useEffect(() => {
     if (!supabase) {
@@ -2166,10 +2252,15 @@ export default function App() {
       }
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, nextSession) => {
       setSession(nextSession);
       setAuthLoading(false);
       setLoginError("");
+      if (event === "PASSWORD_RECOVERY") {
+        setAuthView("reset");
+        setResetError("");
+        setResetSuccess(false);
+      }
     });
 
     return () => {
@@ -2195,13 +2286,56 @@ export default function App() {
     }
   };
 
+  const sendPasswordReset = async (email) => {
+    setForgotLoading(true);
+    setForgotError("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin,
+      });
+      if (error) setForgotError(error.message);
+      else setForgotSent(true);
+    } catch (error) {
+      setForgotError(error instanceof Error ? error.message : "Unable to send a reset link.");
+    } finally {
+      setForgotLoading(false);
+    }
+  };
+
+  const updatePassword = async (password) => {
+    setResetLoading(true);
+    setResetError("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) setResetError(error.message);
+      else setResetSuccess(true);
+    } catch (error) {
+      setResetError(error instanceof Error ? error.message : "Unable to update your password.");
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
+  const finishPasswordReset = async () => {
+    await signOut();
+    setAuthView("login");
+    setResetSuccess(false);
+    window.history.replaceState({}, document.title, window.location.pathname);
+  };
+
   const signOut = async () => {
     await supabase.auth.signOut();
   };
 
   if (supabaseConfigError) return <ConfigurationScreen />;
   if (authLoading) return <main className="auth-page"><p className="auth-loading">Loading Friendly Forms...</p></main>;
-  if (!session) return <LoginScreen onSubmit={signIn} loading={loginLoading} error={loginError} />;
+  if (authView === "reset") {
+    return <ResetPasswordScreen onSubmit={updatePassword} onSignOut={finishPasswordReset} loading={resetLoading} error={resetError} success={resetSuccess} />;
+  }
+  if (authView === "forgot") {
+    return <ForgotPasswordScreen onSubmit={sendPasswordReset} onBack={() => { setAuthView("login"); setForgotError(""); setForgotSent(false); }} loading={forgotLoading} error={forgotError} sent={forgotSent} />;
+  }
+  if (!session) return <LoginScreen onSubmit={signIn} onForgotPassword={() => { setAuthView("forgot"); setLoginError(""); }} loading={loginLoading} error={loginError} />;
   const userRole = session.user.app_metadata?.role === "admin" || session.user.user_metadata?.role === "admin"
     ? "admin"
     : "employee";
